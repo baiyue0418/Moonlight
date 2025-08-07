@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Moony的裁图系统</title>
+  <style>
+    @import url("https://fontsapi.zeoseven.com/169/main/result.css");
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #fff;
+      height: 100%;
+      font-family: "WenQuanYi Bitmap Song 13px", "Courier New", monospace;
+      font-weight: normal;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    .container {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      background-color: #ffffff;
+      color: #000;
+      border: 3px double #000;
+      image-rendering: pixelated;
+    }
+
+    h1 {
+      font-size: 18px;
+      padding: 6px;
+      background: #000;
+      color: #fff;
+      text-align: center;
+      margin: 0;
+    }
+
+    .upload-box {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      border: 2px dashed #000;
+      margin: 16px;
+      background: #eee;
+      position: relative;
+    }
+
+    input[type="file"] {
+      margin: 12px;
+    }
+
+    .canvas-container {
+      position: relative;
+      margin-top: 16px;
+    }
+
+    canvas {
+      border: 2px solid #000;
+      cursor: move;
+    }
+
+    .controls {
+      margin: 12px 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .drag-hint {
+      color: #666;
+      font-size: 11px;
+      margin-top: 4px;
+      display: none;
+    }
+
+    .drag-hint.show {
+      display: block;
+    }
+
+    button {
+      font-family: inherit;
+      font-size: 14px;
+      padding: 4px 12px;
+      border: 2px solid #000;
+      background: #fff;
+      cursor: pointer;
+      box-shadow: 2px 2px 0 #000;
+    }
+
+    button:hover {
+      background: #000;
+      color: #fff;
+    }
+
+    button:active {
+      box-shadow: 1px 1px 0 #000;
+      transform: translate(1px, 1px);
+    }
+
+    .footer {
+      text-align: center;
+      font-size: 12px;
+      padding-top: 8px;
+    }
+
+    .status {
+      color: #666;
+      font-size: 12px;
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>系统控制台 ▸ Moony的裁图系统</h1>
+
+    <div class="upload-box" id="drop-area">
+      <p>拖入截图，自动锁定表情区域</p>
+      <input type="file" id="fileInput" accept="image/*" />
+      <div class="canvas-container">
+        <canvas id="canvas" style="max-width: 100%;"></canvas>
+        <div class="drag-hint" id="dragHint">拖拽图片可微调位置</div>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="controls">
+      <button id="downloadBtn" disabled>下载表情</button>
+      <button id="copyBtn" disabled>复制到剪贴板</button>
+    </div>
+
+    <div class="footer">© Moony像素表情机 • 2025</div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById("fileInput");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const status = document.getElementById("status");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const copyBtn = document.getElementById("copyBtn");
+    const dragHint = document.getElementById("dragHint");
+
+    let originalImage = null;
+    let cropBounds = null;
+    let offsetX = 0;
+    let offsetY = 0;
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    function updateStatus(message) {
+      status.textContent = message;
+    }
+
+    function isWhite([r, g, b, a], threshold = 250) {
+      return r > threshold && g > threshold && b > threshold && a > 0;
+    }
+
+    function findCropBounds(image) {
+      const tempCanvas = document.createElement("canvas");
+      const tempCtx = tempCanvas.getContext("2d");
+      tempCanvas.width = image.width;
+      tempCanvas.height = image.height;
+      tempCtx.drawImage(image, 0, 0);
+
+      const imageData = tempCtx.getImageData(0, 0, image.width, image.height);
+      const { data, width, height } = imageData;
+
+      let top = height, bottom = 0, left = width, right = 0;
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = (y * width + x) * 4;
+          const pixel = data.slice(idx, idx + 4);
+          if (!isWhite(pixel)) {
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+            if (x < left) left = x;
+            if (x > right) right = x;
+          }
+        }
+      }
+
+      return { top, bottom, left, right };
+    }
+
+    function applyCrop(offsetXVal = 0, offsetYVal = 0) {
+      if (!originalImage || !cropBounds) return;
+
+      const { top, bottom, left, right } = cropBounds;
+      const adjustedLeft = Math.max(0, left + offsetXVal);
+      const adjustedTop = Math.max(0, top + offsetYVal);
+      const adjustedRight = Math.min(originalImage.width - 1, right + offsetXVal);
+      const adjustedBottom = Math.min(originalImage.height - 1, bottom + offsetYVal);
+
+      const cropWidth = adjustedRight - adjustedLeft + 1;
+      const cropHeight = adjustedBottom - adjustedTop + 1;
+
+      const tempCanvas = document.createElement("canvas");
+      const tempCtx = tempCanvas.getContext("2d");
+      tempCanvas.width = originalImage.width;
+      tempCanvas.height = originalImage.height;
+      tempCtx.drawImage(originalImage, 0, 0);
+
+      const croppedImage = tempCtx.getImageData(adjustedLeft, adjustedTop, cropWidth, cropHeight);
+      canvas.width = cropWidth;
+      canvas.height = cropHeight;
+      ctx.putImageData(croppedImage, 0, 0);
+
+      updateStatus(`已裁剪: ${cropWidth}×${cropHeight}像素 (偏移: X${offsetXVal}, Y${offsetYVal})`);
+    }
+
+    function processImage(file) {
+      updateStatus("正在处理图片...");
+      const img = new Image();
+      img.onload = () => {
+        originalImage = img;
+        cropBounds = findCropBounds(img);
+        applyCrop();
+        
+        // 启用按钮和显示拖拽提示
+        downloadBtn.disabled = false;
+        copyBtn.disabled = false;
+        dragHint.classList.add("show");
+        
+        updateStatus("图片处理完成！");
+      };
+      img.onerror = () => {
+        updateStatus("图片加载失败！");
+      };
+      img.src = URL.createObjectURL(file);
+    }
+
+    // 文件输入事件
+    fileInput.addEventListener("change", e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      processImage(file);
+    });
+
+    // 拖拽上传
+    const dropArea = document.getElementById("drop-area");
+    
+    dropArea.addEventListener("dragover", e => {
+      e.preventDefault();
+      dropArea.style.background = "#ddd";
+    });
+
+    dropArea.addEventListener("dragleave", e => {
+      e.preventDefault();
+      dropArea.style.background = "#eee";
+    });
+
+    dropArea.addEventListener("drop", e => {
+      e.preventDefault();
+      dropArea.style.background = "#eee";
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        processImage(files[0]);
+      }
+    });
+
+    // 检测是否为 iOS 或移动设备
+    function isMobileDevice() {
+      return /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    // 下载按钮 - 针对移动设备优化
+    downloadBtn.addEventListener("click", () => {
+      if (canvas.width === 0 || canvas.height === 0) {
+        alert("请先上传并处理图片！");
+        return;
+      }
+      
+      try {
+        if (isMobileDevice()) {
+          // 移动设备：直接转换为 blob 并创建下载链接
+          canvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `moony_expression_${Date.now()}.png`;
+            link.style.display = "none";
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // 清理 URL 对象
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+            
+            updateStatus("表情已下载！请在浏览器下载文件夹查看");
+          }, "image/png");
+        } else {
+          // 桌面设备：正常下载
+          const link = document.createElement("a");
+          link.download = `moony_expression_${Date.now()}.png`;
+          link.href = canvas.toDataURL("image/png");
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          updateStatus("表情已下载！");
+        }
+      } catch (err) {
+        alert("下载失败：" + err.message);
+      }
+    });
+
+    // 复制到剪贴板
+    copyBtn.addEventListener("click", async () => {
+      if (canvas.width === 0 || canvas.height === 0) {
+        alert("请先上传并处理图片！");
+        return;
+      }
+
+      try {
+        canvas.toBlob(async blob => {
+          try {
+            await navigator.clipboard.write([
+              new ClipboardItem({ "image/png": blob })
+            ]);
+            updateStatus("已复制到剪贴板！");
+          } catch (err) {
+            alert("复制失败：" + err.message);
+          }
+        }, "image/png");
+      } catch (err) {
+        alert("复制失败：" + err.message);
+      }
+    });
+
+    // 拖拽功能
+    canvas.addEventListener("mousedown", startDrag);
+    canvas.addEventListener("touchstart", startDrag);
+    document.addEventListener("mousemove", drag);
+    document.addEventListener("touchmove", drag);
+    document.addEventListener("mouseup", stopDrag);
+    document.addEventListener("touchend", stopDrag);
+
+    function startDrag(e) {
+      if (!originalImage) return;
+      e.preventDefault();
+      isDragging = true;
+      
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      
+      lastMouseX = clientX - rect.left;
+      lastMouseY = clientY - rect.top;
+      canvas.style.cursor = "grabbing";
+    }
+
+    function drag(e) {
+      if (!isDragging || !originalImage) return;
+      e.preventDefault();
+      
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      
+      const currentX = clientX - rect.left;
+      const currentY = clientY - rect.top;
+      
+      const deltaX = Math.round((currentX - lastMouseX) * 0.2); // 大幅减慢移动速度
+      const deltaY = Math.round((currentY - lastMouseY) * 0.2);
+      
+      offsetX += deltaX;
+      offsetY += deltaY;
+      
+      // 限制偏移范围
+      offsetX = Math.max(-50, Math.min(50, offsetX));
+      offsetY = Math.max(-50, Math.min(50, offsetY));
+      
+      applyCrop(offsetX, offsetY);
+      
+      lastMouseX = currentX;
+      lastMouseY = currentY;
+    }
+
+    function stopDrag() {
+      if (!isDragging) return;
+      isDragging = false;
+      canvas.style.cursor = "move";
+    }
+
+    updateStatus("等待上传图片...");
+  </script>
+</body>
+</html>
