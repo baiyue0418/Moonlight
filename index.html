@@ -59,11 +59,16 @@
     .canvas-container {
       position: relative;
       margin-top: 16px;
+      overflow: hidden;
+      border: 2px solid #000;
+      background: #f9f9f9;
+      max-width: 90vw;
+      max-height: 60vh;
     }
 
     canvas {
-      border: 2px solid #000;
       cursor: move;
+      touch-action: none;
     }
 
     .controls {
@@ -79,6 +84,8 @@
       font-size: 11px;
       margin-top: 4px;
       display: none;
+      text-align: center;
+      line-height: 1.3;
     }
 
     .drag-hint.show {
@@ -115,53 +122,134 @@
       color: #666;
       font-size: 12px;
       margin: 4px 0;
+      text-align: center;
+    }
+
+    .zoom-controls {
+      display: none;
+      margin: 8px 0;
+      text-align: center;
+      gap: 8px;
+    }
+
+    .zoom-controls.show {
+      display: flex;
+      justify-content: center;
+    }
+
+    .zoom-btn {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .reset-btn {
+      font-size: 12px;
+      padding: 2px 8px;
+    }
+
+    /* iOS Safari 兼容 */
+    .ios-save-hint {
+      display: none;
+      background: #fffbcc;
+      border: 2px solid #f0c040;
+      padding: 8px;
+      margin: 8px 0;
+      font-size: 11px;
+      text-align: center;
+      border-radius: 4px;
+    }
+
+    .ios-save-hint.show {
+      display: block;
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>系统控制台 ▸ Moony的裁图系统</h1>
+    <h1>系统控制台 ▸ Moony的裁图系统 Plus</h1>
 
     <div class="upload-box" id="drop-area">
       <p>拖入截图，自动锁定表情区域</p>
       <input type="file" id="fileInput" accept="image/*" />
-      <div class="canvas-container">
-        <canvas id="canvas" style="max-width: 100%;"></canvas>
-        <div class="drag-hint" id="dragHint">拖拽图片可微调位置</div>
+      
+      <div class="canvas-container" id="canvasContainer" style="display: none;">
+        <canvas id="canvas"></canvas>
       </div>
+      
+      <div class="drag-hint" id="dragHint">
+        📱 单指拖拽移动 • 双指缩放去白边<br>
+        🖱️ 鼠标拖拽移动 • 滚轮缩放
+      </div>
+
+      <div class="zoom-controls" id="zoomControls">
+        <button class="zoom-btn" id="zoomOutBtn">−</button>
+        <button class="reset-btn" id="resetBtn">重置</button>
+        <button class="zoom-btn" id="zoomInBtn">+</button>
+      </div>
+
       <div class="status" id="status"></div>
+      <div class="ios-save-hint" id="iosSaveHint">
+        💡 长按图片选择"存储到照片" 即可直接保存到相册
+      </div>
     </div>
 
     <div class="controls">
       <button id="downloadBtn" disabled>下载表情</button>
       <button id="copyBtn" disabled>复制到剪贴板</button>
+      <button id="saveToPhotosBtn" disabled style="display: none;">保存到相册</button>
     </div>
 
-    <div class="footer">© Moony像素表情机 • 2025</div>
+    <div class="footer">© Moony像素表情机 Plus • 2025</div>
   </div>
 
   <script>
     const fileInput = document.getElementById("fileInput");
     const canvas = document.getElementById("canvas");
+    const canvasContainer = document.getElementById("canvasContainer");
     const ctx = canvas.getContext("2d");
     const status = document.getElementById("status");
     const downloadBtn = document.getElementById("downloadBtn");
     const copyBtn = document.getElementById("copyBtn");
+    const saveToPhotosBtn = document.getElementById("saveToPhotosBtn");
     const dragHint = document.getElementById("dragHint");
+    const zoomControls = document.getElementById("zoomControls");
+    const iosSaveHint = document.getElementById("iosSaveHint");
+    const zoomInBtn = document.getElementById("zoomInBtn");
+    const zoomOutBtn = document.getElementById("zoomOutBtn");
+    const resetBtn = document.getElementById("resetBtn");
 
     let originalImage = null;
     let cropBounds = null;
     let offsetX = 0;
     let offsetY = 0;
+    let scale = 1;
     let isDragging = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
+    
+    // 触摸相关变量
+    let touches = [];
+    let lastDistance = 0;
+    let isZooming = false;
 
     function updateStatus(message) {
       status.textContent = message;
     }
 
-    function isWhite([r, g, b, a], threshold = 250) {
+    function isMobileDevice() {
+      return /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    function isIOS() {
+      return /iPad|iPhone|iPod/.test(navigator.userAgent);
+    }
+
+    function isWhite([r, g, b, a], threshold = 245) {
       return r > threshold && g > threshold && b > threshold && a > 0;
     }
 
@@ -193,30 +281,42 @@
       return { top, bottom, left, right };
     }
 
-    function applyCrop(offsetXVal = 0, offsetYVal = 0) {
+    function applyCrop() {
       if (!originalImage || !cropBounds) return;
 
       const { top, bottom, left, right } = cropBounds;
-      const adjustedLeft = Math.max(0, left + offsetXVal);
-      const adjustedTop = Math.max(0, top + offsetYVal);
-      const adjustedRight = Math.min(originalImage.width - 1, right + offsetXVal);
-      const adjustedBottom = Math.min(originalImage.height - 1, bottom + offsetYVal);
+      
+      // 计算缩放后的裁剪区域
+      const scaledWidth = (right - left + 1) * scale;
+      const scaledHeight = (bottom - top + 1) * scale;
+      
+      // 设置画布尺寸
+      canvas.width = scaledWidth;
+      canvas.height = scaledHeight;
+      
+      // 调整容器尺寸
+      const containerWidth = Math.min(scaledWidth, window.innerWidth * 0.8);
+      const containerHeight = Math.min(scaledHeight, window.innerHeight * 0.5);
+      canvasContainer.style.width = containerWidth + 'px';
+      canvasContainer.style.height = containerHeight + 'px';
+      
+      // 清空画布
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // 绘制裁剪和缩放后的图片
+      ctx.drawImage(
+        originalImage,
+        left - offsetX / scale,
+        top - offsetY / scale,
+        (right - left + 1),
+        (bottom - top + 1),
+        0,
+        0,
+        scaledWidth,
+        scaledHeight
+      );
 
-      const cropWidth = adjustedRight - adjustedLeft + 1;
-      const cropHeight = adjustedBottom - adjustedTop + 1;
-
-      const tempCanvas = document.createElement("canvas");
-      const tempCtx = tempCanvas.getContext("2d");
-      tempCanvas.width = originalImage.width;
-      tempCanvas.height = originalImage.height;
-      tempCtx.drawImage(originalImage, 0, 0);
-
-      const croppedImage = tempCtx.getImageData(adjustedLeft, adjustedTop, cropWidth, cropHeight);
-      canvas.width = cropWidth;
-      canvas.height = cropHeight;
-      ctx.putImageData(croppedImage, 0, 0);
-
-      updateStatus(`已裁剪: ${cropWidth}×${cropHeight}像素 (偏移: X${offsetXVal}, Y${offsetYVal})`);
+      updateStatus(`已裁剪: ${Math.round(scaledWidth)}×${Math.round(scaledHeight)}像素 (缩放: ${Math.round(scale*100)}%, 偏移: X${offsetX}, Y${offsetY})`);
     }
 
     function processImage(file) {
@@ -225,14 +325,29 @@
       img.onload = () => {
         originalImage = img;
         cropBounds = findCropBounds(img);
+        
+        // 重置参数
+        offsetX = 0;
+        offsetY = 0;
+        scale = 1;
+        
         applyCrop();
         
-        // 启用按钮和显示拖拽提示
+        // 显示相关元素
+        canvasContainer.style.display = 'block';
+        dragHint.classList.add("show");
+        zoomControls.classList.add("show");
+        
+        // 启用按钮
         downloadBtn.disabled = false;
         copyBtn.disabled = false;
-        dragHint.classList.add("show");
         
-        updateStatus("图片处理完成！");
+        // iOS 显示保存提示
+        if (isIOS()) {
+          iosSaveHint.classList.add("show");
+        }
+        
+        updateStatus("图片处理完成！可以拖拽和缩放调整");
       };
       img.onerror = () => {
         updateStatus("图片加载失败！");
@@ -269,12 +384,152 @@
       }
     });
 
-    // 检测是否为 iOS 或移动设备
-    function isMobileDevice() {
-      return /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    // 获取触摸点距离
+    function getTouchDistance(touch1, touch2) {
+      return Math.sqrt(
+        Math.pow(touch2.clientX - touch1.clientX, 2) +
+        Math.pow(touch2.clientY - touch1.clientY, 2)
+      );
     }
 
-    // 下载按钮 - 针对移动设备优化
+    // 触摸开始
+    canvas.addEventListener("touchstart", e => {
+      e.preventDefault();
+      touches = Array.from(e.touches);
+      
+      if (touches.length === 1) {
+        // 单指拖拽
+        startDrag(e);
+      } else if (touches.length === 2) {
+        // 双指缩放
+        isZooming = true;
+        lastDistance = getTouchDistance(touches[0], touches[1]);
+      }
+    });
+
+    // 触摸移动
+    canvas.addEventListener("touchmove", e => {
+      e.preventDefault();
+      touches = Array.from(e.touches);
+      
+      if (touches.length === 1 && !isZooming) {
+        // 单指拖拽
+        drag(e);
+      } else if (touches.length === 2 && isZooming) {
+        // 双指缩放
+        const currentDistance = getTouchDistance(touches[0], touches[1]);
+        const scaleChange = currentDistance / lastDistance;
+        
+        scale *= scaleChange;
+        scale = Math.max(0.5, Math.min(5, scale)); // 限制缩放范围
+        
+        applyCrop();
+        lastDistance = currentDistance;
+      }
+    });
+
+    // 触摸结束
+    canvas.addEventListener("touchend", e => {
+      e.preventDefault();
+      touches = Array.from(e.touches);
+      
+      if (touches.length === 0) {
+        isZooming = false;
+        stopDrag();
+      } else if (touches.length === 1 && isZooming) {
+        isZooming = false;
+        // 切换到拖拽模式
+        startDrag(e);
+      }
+    });
+
+    // 鼠标事件
+    canvas.addEventListener("mousedown", startDrag);
+    document.addEventListener("mousemove", drag);
+    document.addEventListener("mouseup", stopDrag);
+
+    // 鼠标滚轮缩放
+    canvas.addEventListener("wheel", e => {
+      if (!originalImage) return;
+      e.preventDefault();
+      
+      const scaleChange = e.deltaY > 0 ? 0.9 : 1.1;
+      scale *= scaleChange;
+      scale = Math.max(0.5, Math.min(5, scale));
+      
+      applyCrop();
+    });
+
+    function startDrag(e) {
+      if (!originalImage || isZooming) return;
+      e.preventDefault();
+      isDragging = true;
+      
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      
+      lastMouseX = clientX - rect.left;
+      lastMouseY = clientY - rect.top;
+      canvas.style.cursor = "grabbing";
+    }
+
+    function drag(e) {
+      if (!isDragging || !originalImage || isZooming) return;
+      e.preventDefault();
+      
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      
+      const currentX = clientX - rect.left;
+      const currentY = clientY - rect.top;
+      
+      const deltaX = (currentX - lastMouseX) * 2;
+      const deltaY = (currentY - lastMouseY) * 2;
+      
+      offsetX += deltaX;
+      offsetY += deltaY;
+      
+      // 限制偏移范围
+      const maxOffset = 100 * scale;
+      offsetX = Math.max(-maxOffset, Math.min(maxOffset, offsetX));
+      offsetY = Math.max(-maxOffset, Math.min(maxOffset, offsetY));
+      
+      applyCrop();
+      
+      lastMouseX = currentX;
+      lastMouseY = currentY;
+    }
+
+    function stopDrag() {
+      if (!isDragging) return;
+      isDragging = false;
+      canvas.style.cursor = "move";
+    }
+
+    // 缩放控制按钮
+    zoomInBtn.addEventListener("click", () => {
+      if (!originalImage) return;
+      scale = Math.min(5, scale * 1.2);
+      applyCrop();
+    });
+
+    zoomOutBtn.addEventListener("click", () => {
+      if (!originalImage) return;
+      scale = Math.max(0.5, scale / 1.2);
+      applyCrop();
+    });
+
+    resetBtn.addEventListener("click", () => {
+      if (!originalImage) return;
+      scale = 1;
+      offsetX = 0;
+      offsetY = 0;
+      applyCrop();
+    });
+
+    // 下载功能
     downloadBtn.addEventListener("click", () => {
       if (canvas.width === 0 || canvas.height === 0) {
         alert("请先上传并处理图片！");
@@ -282,34 +537,20 @@
       }
       
       try {
-        if (isMobileDevice()) {
-          // 移动设备：直接转换为 blob 并创建下载链接
-          canvas.toBlob((blob) => {
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            link.href = url;
-            link.download = `moony_expression_${Date.now()}.png`;
-            link.style.display = "none";
-            
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            
-            // 清理 URL 对象
-            setTimeout(() => URL.revokeObjectURL(url), 100);
-            
-            updateStatus("表情已下载！请在浏览器下载文件夹查看");
-          }, "image/png");
-        } else {
-          // 桌面设备：正常下载
+        canvas.toBlob((blob) => {
+          const url = URL.createObjectURL(blob);
           const link = document.createElement("a");
+          link.href = url;
           link.download = `moony_expression_${Date.now()}.png`;
-          link.href = canvas.toDataURL("image/png");
+          link.style.display = "none";
+          
           document.body.appendChild(link);
           link.click();
           document.body.removeChild(link);
+          
+          setTimeout(() => URL.revokeObjectURL(url), 100);
           updateStatus("表情已下载！");
-        }
+        }, "image/png");
       } catch (err) {
         alert("下载失败：" + err.message);
       }
@@ -330,68 +571,14 @@
             ]);
             updateStatus("已复制到剪贴板！");
           } catch (err) {
-            alert("复制失败：" + err.message);
+            // 移动端可能不支持，提供替代方案
+            updateStatus("复制功能需要较新的浏览器版本");
           }
         }, "image/png");
       } catch (err) {
-        alert("复制失败：" + err.message);
+        updateStatus("复制功能需要较新的浏览器版本");
       }
     });
-
-    // 拖拽功能
-    canvas.addEventListener("mousedown", startDrag);
-    canvas.addEventListener("touchstart", startDrag);
-    document.addEventListener("mousemove", drag);
-    document.addEventListener("touchmove", drag);
-    document.addEventListener("mouseup", stopDrag);
-    document.addEventListener("touchend", stopDrag);
-
-    function startDrag(e) {
-      if (!originalImage) return;
-      e.preventDefault();
-      isDragging = true;
-      
-      const rect = canvas.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      
-      lastMouseX = clientX - rect.left;
-      lastMouseY = clientY - rect.top;
-      canvas.style.cursor = "grabbing";
-    }
-
-    function drag(e) {
-      if (!isDragging || !originalImage) return;
-      e.preventDefault();
-      
-      const rect = canvas.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      
-      const currentX = clientX - rect.left;
-      const currentY = clientY - rect.top;
-      
-      const deltaX = Math.round((currentX - lastMouseX) * 0.2); // 大幅减慢移动速度
-      const deltaY = Math.round((currentY - lastMouseY) * 0.2);
-      
-      offsetX += deltaX;
-      offsetY += deltaY;
-      
-      // 限制偏移范围
-      offsetX = Math.max(-50, Math.min(50, offsetX));
-      offsetY = Math.max(-50, Math.min(50, offsetY));
-      
-      applyCrop(offsetX, offsetY);
-      
-      lastMouseX = currentX;
-      lastMouseY = currentY;
-    }
-
-    function stopDrag() {
-      if (!isDragging) return;
-      isDragging = false;
-      canvas.style.cursor = "move";
-    }
 
     updateStatus("等待上传图片...");
   </script>
